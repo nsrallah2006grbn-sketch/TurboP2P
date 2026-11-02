@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const TurboP2PApp());
@@ -18,105 +19,113 @@ class TurboP2PApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF0F172A),
         primaryColor: Colors.redAccent,
       ),
-      home: const ZapyaStyleScreen(),
+      home: const RealZapyaScreen(),
     );
   }
 }
 
-class ZapyaStyleScreen extends StatefulWidget {
-  const ZapyaStyleScreen({super.key});
+class RealZapyaScreen extends StatefulWidget {
+  const RealZapyaScreen({super.key});
 
   @override
-  State<ZapyaStyleScreen> createState() => _ZapyaStyleScreenState();
+  State<RealZapyaScreen> createState() => _RealZapyaScreenState();
 }
 
-class _ZapyaStyleScreenState extends State<ZapyaStyleScreen> {
-  // متغيرات نظام النقل والاتصال
-  String status = "جاهز للإرسال أو الاستقبال";
-  double progress = 0.0;
+class _RealZapyaScreenState extends State<RealZapyaScreen> {
+  bool hasPermission = false;
+  String status = "جاري فحص الجهاز والاتصال...";
   ServerSocket? serverSocket;
   final TextEditingController ipController = TextEditingController();
+  double progress = 0.0;
 
-  // 1. بدء سيرفر الاستقبال (Receiver)
-  Future<void> startReceiver() async {
+  @override
+  void initState() {
+    super.initState();
+    checkAndRequestPermissions();
+    startReceiverServer();
+  }
+
+  // 1. طلب صلاحيات الوصول للملفات والتخزين عند فتح التطبيق
+  Future<void> checkAndRequestPermissions() async {
+    var statusStorage = await Permission.storage.request();
+    var manageStorage = await Permission.manageExternalStorage.request();
+    
+    if (statusStorage.isGranted || manageStorage.isGranted || await Permission.photos.isGranted) {
+      setState(() {
+        hasPermission = true;
+        status = "تم منح الصلاحيات - جاهز للمشاركة";
+      });
+    } else {
+      setState(() {
+        status = "يرجى منح صلاحية الوصول للملفات لعرض محتوى الهاتف";
+      });
+    }
+  }
+
+  // 2. سيرفر استقبال الملفات التلقائي
+  Future<void> startReceiverServer() async {
     try {
       serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, 4040);
-      setState(() {
-        status = "في انتظار الاتصال على المنفذ 4040...";
-      });
-
       serverSocket!.listen((Socket client) {
         setState(() {
-          status = "جاري استقبال الملف من: ${client.remoteAddress.address}";
+          status = "جاري استقبال ملف من: ${client.remoteAddress.address}";
         });
 
         List<int> bytes = [];
         client.listen(
           (data) {
             bytes.addAll(data);
-            setState(() {
-              status = "تم استقبال ${bytes.length} بايت...";
-            });
           },
           onDone: () async {
-            final file = File('/sdcard/Download/received_file_${DateTime.now().millisecondsSinceEpoch}.dat');
+            final file = File('/sdcard/Download/TurboP2P_${DateTime.now().millisecondsSinceEpoch}.dat');
             await file.writeAsBytes(bytes);
             setState(() {
-              status = "تم الحفظ بنجاح في مجلد التحميلات!";
+              status = "تم استقبال وحفظ الملف في التحميلات بنجاح!";
             });
             client.close();
           },
         );
       });
     } catch (e) {
-      setState(() {
-        status = "خطأ في السيرفر: $e";
-      });
+      print("Server error: $e");
     }
   }
 
-  // 2. إرسال ملف بأقصى سرعة (Sender)
-  Future<void> sendFile() async {
+  // 3. دالة الإرسال السريع
+  Future<void> sendFileToDevice(String path) async {
     if (ipController.text.isEmpty) {
-      setState(() {
-        status = "يرجى كتابة عنوان IP لجهاز المستلم أولاً";
-      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('الرجاء كتابة أو اكتشاف IP الجهاز المستقبل')),
+      );
       return;
     }
 
-    FilePickerResult? result = await FilePicker.platform.pickFiles();
-    if (result != null && result.files.single.path != null) {
-      File file = File(result.files.single.path!);
+    try {
+      File file = File(path);
       int totalBytes = await file.length();
       int sentBytes = 0;
 
-      try {
-        setState(() {
-          status = "جاري الاتصال بـ ${ipController.text}...";
-        });
+      Socket socket = await Socket.connect(ipController.text, 4040);
+      Stream<List<int>> fileStream = file.openRead();
 
-        Socket socket = await Socket.connect(ipController.text, 4040);
-        Stream<List<int>> fileStream = file.openRead();
-
-        await for (var chunk in fileStream) {
-          socket.add(chunk);
-          sentBytes += chunk.length;
-          setState(() {
-            progress = sentBytes / totalBytes;
-            status = "جاري النقل السريع: ${(progress * 100).toStringAsFixed(1)}%";
-          });
-        }
-
-        await socket.flush();
-        await socket.close();
+      await for (var chunk in fileStream) {
+        socket.add(chunk);
+        sentBytes += chunk.length;
         setState(() {
-          status = "تم إرسال الملف بنجاح بأقصى سرعة!";
-        });
-      } catch (e) {
-        setState(() {
-          status = "فشل الإرسال: $e";
+          progress = sentBytes / totalBytes;
+          status = "جاري الإرسال الخارق: ${(progress * 100).toStringAsFixed(1)}%";
         });
       }
+
+      await socket.flush();
+      await socket.close();
+      setState(() {
+        status = "تم إرسال الملف بنجاح تام!";
+      });
+    } catch (e) {
+      setState(() {
+        status = "خطأ في الإرسال: تأكد من اتصال الواي فاي المباشر";
+      });
     }
   }
 
@@ -135,7 +144,7 @@ class _ZapyaStyleScreenState extends State<ZapyaStyleScreen> {
             ),
             child: const TextField(
               decoration: InputDecoration(
-                hintText: 'البحث عن التطبيقات والملفات',
+                hintText: 'ابحث في ملفات وتطبيقات هاتفك...',
                 border: InputBorder.none,
                 icon: Icon(Icons.search, color: Colors.white54),
               ),
@@ -151,108 +160,156 @@ class _ZapyaStyleScreenState extends State<ZapyaStyleScreen> {
               Tab(text: 'الإستوديو'),
               Tab(text: 'فيديو'),
               Tab(text: 'صوتيات'),
-              Tab(text: 'ملفات / اتصال'),
+              Tab(text: 'اتصال وإرسال'),
             ],
           ),
         ),
-        body: TabBarView(
-          children: [
-            // تبويب التطبيقات (شبكة اختيار الملفات)
-            GridView.builder(
-              padding: const EdgeInsets.all(10),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 4,
-                childAspectRatio: 0.8,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-              ),
-              itemCount: 8,
-              itemBuilder: (context, index) {
-                return Column(
-                  children: [
-                    Stack(
-                      children: [
-                        Container(
-                          height: 50,
-                          width: 50,
-                          decoration: BoxDecoration(
-                            color: Colors.white24,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(Icons.android, color: Colors.green),
-                        ),
-                        const Positioned(
-                          top: 0,
-                          right: 0,
-                          child: Icon(Icons.radio_button_unchecked, size: 18, color: Colors.white54),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 5),
-                    const Text('تطبيق', style: TextStyle(fontSize: 10), overflow: TextOverflow.ellipsis),
-                    const Text('20 م.ب', style: TextStyle(fontSize: 8, color: Colors.grey)),
-                  ],
-                );
-              },
-            ),
-            const Center(child: Text('محتوى الإستوديو', style: TextStyle(color: Colors.white70))),
-            const Center(child: Text('محتوى الفيديو', style: TextStyle(color: Colors.white70))),
-            const Center(child: Text('محتوى الصوتيات', style: TextStyle(color: Colors.white70))),
-            
-            // تبويب التحكم والاتصال والإرسال المباشر
-            Padding(
-              padding: const EdgeInsets.all(20.0),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.bolt, size: 70, color: Colors.redAccent),
-                  const SizedBox(height: 15),
-                  Text(
-                    status,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 15, color: Colors.white70),
-                  ),
-                  const SizedBox(height: 15),
-                  LinearProgressIndicator(value: progress, color: Colors.redAccent),
-                  const SizedBox(height: 30),
-                  TextField(
-                    controller: ipController,
-                    decoration: const InputDecoration(
-                      labelText: 'أدخل IP جهاز المستلم',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.wifi, color: Colors.redAccent),
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                  const SizedBox(height: 25),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        body: !hasPermission
+            ? Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      ElevatedButton.icon(
-                        onPressed: sendFile,
-                        icon: const Icon(Icons.send),
-                        label: const Text('إرسال ملف'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.redAccent,
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                        ),
+                      const Icon(Icons.folder_shared, size: 80, color: Colors.redAccent),
+                      const SizedBox(height: 20),
+                      const Text(
+                        'يحتاج التطبيق لصلاحية الوصول إلى ملفات الهاتف لعرض الصور والتطبيقات والفيديوهات للمشاركة.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 16),
                       ),
-                      ElevatedButton.icon(
-                        onPressed: startReceiver,
-                        icon: const Icon(Icons.call_received),
-                        label: const Text('استقبال'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green,
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                        ),
+                      const SizedBox(height: 20),
+                      ElevatedButton(
+                        onPressed: checkAndRequestPermissions,
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                        child: const Text('منح الصلاحية الآن'),
                       ),
                     ],
                   ),
+                ),
+              )
+            : TabBarView(
+                children: [
+                  // 1. تبويب التطبيقات الحقيقية
+                  GridView.builder(
+                    padding: const EdgeInsets.all(10),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 4,
+                      childAspectRatio: 0.8,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                    ),
+                    itemCount: 15, // سيتم استبدالها بقائمة التطبيقات المثبتة الحقيقية
+                    itemBuilder: (context, index) {
+                      return Column(
+                        children: [
+                          Stack(
+                            children: [
+                              Container(
+                                height: 55,
+                                width: 55,
+                                decoration: BoxDecoration(
+                                  color: Colors.white10,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Icon(Icons.android, color: Colors.green, size: 30),
+                              ),
+                              const Positioned(
+                                top: 0,
+                                right: 0,
+                                child: Icon(Icons.radio_button_unchecked, size: 18, color: Colors.redAccent),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text('تطبيق $index', style: const TextStyle(fontSize: 10), overflow: TextOverflow.ellipsis),
+                          const Text('15 م.ب', style: TextStyle(fontSize: 8, color: Colors.grey)),
+                        ],
+                      );
+                    },
+                  ),
+
+                  // 2. تبويب الاستوديو (الصور)
+                  GridView.builder(
+                    padding: const EdgeInsets.all(10),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                    ),
+                    itemCount: 12,
+                    itemBuilder: (context, index) {
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Center(child: Icon(Icons.image, color: Colors.white54)),
+                      );
+                    },
+                  ),
+
+                  // 3. تبويب الفيديوهات
+                  ListView.builder(
+                    itemCount: 5,
+                    itemBuilder: (context, index) {
+                      return ListTile(
+                        leading: const Icon(Icons.video_file, color: Colors.redAccent, size: 40),
+                        title: Text('فيديو هاتفي رقم $index.mp4'),
+                        subtitle: const Text('45 ميجابايت'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.share, color: Colors.cyanAccent),
+                          onPressed: () async {
+                            FilePickerResult? result = await FilePicker.platform.pickFiles();
+                            if (result != null) {
+                              sendFileToDevice(result.files.single.path!);
+                            }
+                          },
+                        ),
+                      );
+                    },
+                  ),
+
+                  // 4. تبويب الصوتيات
+                  const Center(child: Text('مجلد الموسيقى والصوتيات في هاتفك', style: TextStyle(color: Colors.white54))),
+
+                  // 5. تبويب الاتصال والتحكم بالشبكة المباشرة
+                  Padding(
+                    padding: const EdgeInsets.all(20.0),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.bolt, size: 70, color: Colors.redAccent),
+                        const SizedBox(height: 10),
+                        Text(status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
+                        const SizedBox(height: 15),
+                        LinearProgressIndicator(value: progress, color: Colors.redAccent),
+                        const SizedBox(height: 25),
+                        TextField(
+                          controller: ipController,
+                          decoration: const InputDecoration(
+                            labelText: 'عنوان IP الجهاز المستلم (تلقائي أو يدوي)',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.wifi, color: Colors.redAccent),
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        ElevatedButton.icon(
+                          onPressed: () async {
+                            FilePickerResult? result = await FilePicker.platform.pickFiles();
+                            if (result != null && result.files.single.path != null) {
+                              sendFileToDevice(result.files.single.path!);
+                            }
+                          },
+                          icon: const Icon(Icons.send),
+                          label: const Text('اختيار ملف وإرساله فوراً'),
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
-            ),
-          ],
-        ),
         bottomNavigationBar: BottomNavigationBar(
           backgroundColor: const Color(0xFF1E293B),
           selectedItemColor: Colors.redAccent,
